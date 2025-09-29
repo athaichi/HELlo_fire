@@ -1,9 +1,9 @@
-""""
-from .grid import Grid
-from .fire import FireModel
-from .tractor import Tractor
-from .planner import Planner
-from .viz import render
+
+from grid import Grid
+from fire import FireModel
+from tractor import Tractor
+from planner import Planner
+from viz import render
 
 def run():
     grid = Grid(20, 15)
@@ -11,7 +11,6 @@ def run():
     tractor = Tractor(5, 5)
     planner = Planner()
 
-    # basic placeholder loop
     for step in range(5):
         fire.step(grid)
         tractor.sense(grid)
@@ -21,6 +20,9 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+
+    
 """
 import pybullet as p
 import pybullet_data
@@ -51,3 +53,4 @@ def run():
 if __name__ == "__main__":
     run()
 
+"""
