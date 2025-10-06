@@ -24,8 +24,6 @@ def run():
         state = np.zeros((grid.height, grid.width), dtype=int)
         state[grid.burning] = 1
         state[(grid.ignite_time < fire.current_time) & (~grid.burning)] = 2
-        print(f"\nStep {step}, time={fire.current_time:.1f}")
-        print(state)
 
         # Custom colormap: 0 transparent, 1 red (burning), 2 black (burned)
         from matplotlib.colors import ListedColormap
