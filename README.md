@@ -13,5 +13,5 @@ Also make sure that conda is up and running. Installation instructions can be fo
 Then run the project by running the following commands: 
 ``` 
 conda activate wildfire
-python -m src.sim 
+python3 sim.py 
 ```
