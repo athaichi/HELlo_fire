@@ -17,7 +17,7 @@ FUEL_MODELS = {
         "delta": 1.0, 
         "M_x": 0.3, # does this matter?
         "sigma": 2000, 
-        "h": 0, # no heeat content
+        "h": 0, # no heat content
         "S_T": 0.0, "S_e": 0.0, # no spread
         "p_p": 32.
     }

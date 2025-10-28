@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 def run():
-    grid = generate_soybean_farm(width=50, height=50, base_elev=100, noise=3, smoothness=5)
-    grid.ignite(0, 40)  # seed in middle
+    grid = generate_soybean_farm(width=500, height=500, base_elev=100, noise=3, smoothness=5)
+    grid.ignite(0, 40)  # seed in middle - MAKE THIS RANDOM
 
     # inits
     fire = FireModel(moisture=0.05, wind_speed=15.0, wind_dir=90.0, cell_size=10.0)
@@ -14,6 +14,7 @@ def run():
 
     # keep track of tractor path
     tractor_path = set()
+    #tractor_success = True
 
     plt.ion()
     fig, ax = plt.subplots()
@@ -25,9 +26,11 @@ def run():
         tx, ty = tractor.x, tractor.y
 
         # simple collision logic 
-        # 1. stop if tractor runs into burning soybeans
+        # 1. stop if tractor runs into burning soybeans OR if tractor reaches burned field
+        # TODO: update fail on burned field
         if grid.burning[ty, tx]: 
             print(f"Tractor ran into fire at ({tractor.x}, {tractor.y})")
+            plt.text(10.5,55.5,'! Tractor has run into fireline !', fontsize=10, color='red')
             break 
         
         # 2. change plowed fuel type to be fire break
