@@ -121,12 +121,14 @@ class FireTractorEnv:
 
         # 1) Tractor move (only if active)
         tx, ty = self.tractor.x, self.tractor.y
+        done = False  # <-- track early termination
+
         if self.tractor_active:
             if action == 1:   self.tractor.direction = "up"
             elif action == 2: self.tractor.direction = "down"
             elif action == 3: self.tractor.direction = "left"
             elif action == 4: self.tractor.direction = "right"
-            # 0 = noop (keep direction, but you can also implement stay)
+            # 0 = noop
 
             self.tractor.move(self.width, self.height)  # must NOT clamp inside
             tx, ty = self.tractor.x, self.tractor.y
@@ -134,17 +136,27 @@ class FireTractorEnv:
             # Leaving farm -> tractor disappears; fire keeps running
             if tx < 0 or ty < 0 or tx >= self.width or ty >= self.height:
                 self.tractor_active = False
-                self.tractor_exited = True      # <- mark as survived via exit
+                self.tractor_exited = True
+
             else:
-                # Tractor hits fire -> disabled (rule 4)
-                if self.grid.burning[ty, tx]:
+                # 🔥☠️ Tractor dies on burning OR burned
+                if self.grid.burning[ty, tx] or self.grid.burned[ty, tx]:
                     self.tractor_active = False
-                    self.tractor_dead = True    # <- mark as dead
+                    self.tractor_dead = True
+                    done = True  # end episode immediately
+
                 else:
-                    # Make firebreak (rule 3)
+                    # Make firebreak (unburnable)
                     self._make_firebreak(tx, ty)
                     self.tractor_path.add((ty, tx))
 
+        # If tractor just died this step, end now (no more fire advance or rendering needed)
+        if done:
+            reward = 0.0
+            obs = self._get_observation()
+            info = self._get_info(done=True)
+            truncated = False
+            return obs, reward, True, truncated, info
 
         # 2) Advance fire model by dt
         self.fire.step(self.grid, dt=dt)  # update .burning and advance ignite_time
@@ -152,8 +164,9 @@ class FireTractorEnv:
         # 3) Enforce burned flag
         self._update_burned_flags()
 
-        # 4) Convergence detection: no burning & no changes in ignite_time this step
+        # 4) Convergence detection (no more burning, etc.)
         done = self._converged()
+        
 
         # 5) Reward: + cells saved delta on this step (optional placeholder)
         reward = 0.0  # TODO for RL; D* won’t use it.
@@ -352,53 +365,48 @@ class FireTractorEnv:
     # ------------- DEMO MODE -------------
 
     def demo(self, fire_start=None, tractor_start=None, max_steps=500, pause=0.4):
-        """
-        Run a simple visual demo of the environment.
-        Tractor moves straight down by default.
-        Stops when the fire finishes spreading OR max_steps reached.
-
-        Args:
-            fire_start: (x, y) or None → random ignition
-            tractor_start: (x, y, direction) or None → random top-edge spawn facing down
-            max_steps: safety step cap
-            pause: visualization delay per frame in seconds
-        """
         import time
+        import matplotlib.pyplot as plt
+
         obs, info = self.reset(fire_start=fire_start, tractor_start=tractor_start)
 
-        # Render initial frame
+        # Initial frame
         self.render(block=False)
         time.sleep(pause)
 
         for _ in range(max_steps):
-            # Default simple action: move down (2)
-            action = 2
-
-            # Step environment (your step returns 5 values)
+            action = 2  # straight down
             obs, reward, done, truncated, info = self.step(action)
 
-            # Render & slow down for visual effect
+            # If tractor died, stop immediately (no more rendering)
+            if self.tractor_dead:
+                break
+
             self.render(block=False)
             time.sleep(pause)
 
-            # Stop early if fire finished spreading (your _converged sets done=True)
             if done:
                 break
 
-        # Final frame stays on screen
-        self.render(block=True)
+        # If tractor died, close figure; else hold final frame
+        if self.tractor_dead:
+            if self._fig is not None:
+                plt.close(self._fig)
+                self._fig, self._ax = None, None
+        else:
+            self.render(block=True)
 
         # -------- Summary --------
         total = self.width * self.height
-        burned = int(np.sum(self.grid.burned))
+        burned = int(np.sum(self.grid.burned))  # use burned mask
         firebreak = len(self.tractor_path)
         saved = total - burned  # firebreak counts as saved
 
+        survived = (self.tractor_exited or (self.tractor_active and not self.tractor_dead))
         print("\n===== DEMO RESULTS =====")
         print(f"🌱 Saved land:       {saved}")
         print(f"🔥 Burned land:      {burned}")
         print(f"🟪 Firebreak cells:  {firebreak}")
-        survived = (self.tractor_exited or (self.tractor_active and not self.tractor_dead))
         print(f"🚜 Tractor survived: {'Yes' if survived else 'No'}")
         print(f"⏱️ Duration:         {self.fire.current_time:.1f} min")
         print("========================\n")
