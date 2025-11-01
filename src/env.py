@@ -130,7 +130,7 @@ class FireTractorEnv:
             elif action == 4: self.tractor.direction = "right"
             # 0 = noop
 
-            self.tractor.move(self.width, self.height)  # must NOT clamp inside
+            self.tractor.move(self.width, self.height)
             tx, ty = self.tractor.x, self.tractor.y
 
             # Leaving farm -> tractor disappears; fire keeps running
@@ -139,7 +139,7 @@ class FireTractorEnv:
                 self.tractor_exited = True
 
             else:
-                # 🔥☠️ Tractor dies on burning OR burned
+                # Tractor dies on burning OR burned
                 if self.grid.burning[ty, tx] or self.grid.burned[ty, tx]:
                     self.tractor_active = False
                     self.tractor_dead = True
@@ -156,6 +156,7 @@ class FireTractorEnv:
             obs = self._get_observation()
             info = self._get_info(done=True)
             truncated = False
+            print("Tractor has died. Ending episode.")
             return obs, reward, True, truncated, info
 
         # 2) Advance fire model by dt
@@ -387,14 +388,6 @@ class FireTractorEnv:
 
             if done:
                 break
-
-        # If tractor died, close figure; else hold final frame
-        if self.tractor_dead:
-            if self._fig is not None:
-                plt.close(self._fig)
-                self._fig, self._ax = None, None
-        else:
-            self.render(block=True)
 
         # -------- Summary --------
         total = self.width * self.height
