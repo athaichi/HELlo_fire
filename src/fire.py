@@ -45,7 +45,7 @@ class FireModel:
 
             params = FUEL_MODELS[fuel_type]
 
-            for nx, ny in grid.neighbors(x, y):
+            for nx, ny in grid.neighbors_4(x, y):
                 if grid.fuel_type[ny, nx] == 0:
                     continue
 
@@ -72,6 +72,12 @@ class FireModel:
                     slope_mag, slope_dir
                 )
 
+                """
+                noise = np.random.normal(loc=1.0, scale=0.1)  # 20% variation
+                noise = np.clip(noise, 0.1, 1.5)              # prevent negative or crazy values
+
+                R = R * noise
+                """
                 if R[0] > 0:
                     spread_time = dist / R[0]
                     new_time = self.current_time + spread_time

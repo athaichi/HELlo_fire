@@ -11,13 +11,15 @@ class Tractor:
 
     def move(self, grid_width, grid_height):
         """Decide and apply movement."""
-        if self.direction == 'left' or self.direction == 'a': 
-            self.x = max(self.x - self.speed, 0)
-        elif self.direction == 'right' or self.direction == 'd': 
-            self.x = min(self.x + self.speed, grid_width - 1)
-        elif self.direction == 'up' or self.direction == 'w':
-            self.y = max(self.y - self.speed, 0)
-        elif self.direction == 'down' or self.direction == 's':
-            self.y = min(self.y + self.speed, grid_height - 1)
+        if self.direction in ('left', 'a'):
+            self.x -= self.speed
+        elif self.direction in ('right', 'd'):
+            self.x += self.speed
+        elif self.direction in ('up', 'w'):
+            self.y -= self.speed
+        elif self.direction in ('down', 's'):
+            self.y += self.speed
+
+        return self.x, self.y
         
 

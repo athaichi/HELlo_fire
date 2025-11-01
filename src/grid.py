@@ -1,33 +1,45 @@
+# grid.py
 import numpy as np
 
 class Grid:
-    def __init__(self, width=None, height=None):
-        if width and height:
-            self.width = width
-            self.height = height
-            self.elevation = np.zeros((height, width))
-            self.fuel_type = np.zeros((height, width), dtype=int)
-            self.burning = np.zeros((height, width), dtype=bool)
-            self.burned = np.zeros((height, width), dtype=bool)
+    """
+    Internal simulation state container.
+    Coordinates are (x, y) in functions; arrays are indexed [y, x].
+    """
+    def __init__(self, width: int, height: int):
+        self.width = int(width)
+        self.height = int(height)
+
+        # Static maps
+        self.elevation = np.zeros((self.height, self.width), dtype=float)
+        self.fuel_type = np.zeros((self.height, self.width), dtype=int)  # 0 = no fuel
+        # Optional per-cell variability (multipliers)
+        self.fuel_load_map = np.ones((self.height, self.width), dtype=float)
+        self.moisture_map  = np.ones((self.height, self.width), dtype=float)
+
+        # Fire state (Option B)
+        self.ignite_time = np.full((self.height, self.width), np.inf, dtype=float)
+        self.burn_start  = np.full((self.height, self.width), np.inf, dtype=float)
+        self.burning     = np.zeros((self.height, self.width), dtype=bool)  # active right now
+        self.burned      = np.zeros((self.height, self.width), dtype=bool)  # done burning forever
 
     @classmethod
-    def from_csv(cls, elev_file, fuel_file):
-        elevation = np.loadtxt(elev_file, delimiter=",")
-        fuel_type = np.loadtxt(fuel_file, delimiter=",", dtype=int)
-
+    def from_arrays(cls, elevation: np.ndarray, fuel_type: np.ndarray):
         h, w = elevation.shape
-        grid = cls(w, h)
-        grid.elevation = elevation
-        grid.fuel_type = fuel_type
-        grid.burning = np.zeros_like(fuel_type, dtype=bool)
-        return grid
+        g = cls(w, h)
+        g.elevation = elevation.astype(float, copy=True)
+        g.fuel_type = fuel_type.astype(int, copy=True)
+        return g
 
-    def ignite(self, x, y):
+    def ignite(self, x: int, y: int, time: float = 0.0):
+        """Start fire at (x,y). Sets burning= True and ignite_time/burn_start = time."""
         self.burning[y, x] = True
+        self.ignite_time[y, x] = time
+        self.burn_start[y, x] = time
 
-    def neighbors(self, x, y):
-        offsets = [(1,0), (-1,0), (0,1), (0,-1)]
-        for dx, dy in offsets:
-            nx, ny = x+dx, y+dy
-            if 0 <= nx < self.width and 0 <= ny < self.height:
-                yield nx, ny
+    def neighbors_4(self, x: int, y: int):
+        """4-connected neighbors within bounds."""
+        if x + 1 < self.width:  yield (x + 1, y)
+        if x - 1 >= 0:          yield (x - 1, y)
+        if y + 1 < self.height: yield (x, y + 1)
+        if y - 1 >= 0:          yield (x, y - 1)
