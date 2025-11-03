@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import random
 from scipy.ndimage import distance_transform_edt
-from heapq import heappush, heappop
+from heapq import heappush, heappop, heapify
 
 from grid import Grid
 from mapgen import generate_soybean_farm
@@ -26,6 +26,65 @@ STATE_BURNED    = 2  # burned out
 STATE_FIREBREAK = 3  # tractor-plowed, no fuel, unburnable
 STATE_TRACTOR   = 4  # visualization only
 
+class DStarLite:
+    def __init__(self, width, height, start, goal):
+        self.width = width
+        self.height = height
+        self.start = start
+        self.goal  = goal
+        self.g = np.full((height, width), np.inf)
+        self.rhs = np.full((height, width), np.inf)
+        self.rhs[goal] = 0
+        self.U = []
+        self.km = 0
+        self.cost = np.ones((height, width))
+        self.last = start
+
+    def heuristic(self, a, b):
+        return abs(a[0]-b[0]) + abs(a[1]-b[1])  # Manhattan calculation
+
+    def calculate_key(self, s):
+        g_s, rhs_s = self.g[s], self.rhs[s]
+        k1 = min(g_s, rhs_s) + self.heuristic(self.start, s) + self.km
+        k2 = min(g_s, rhs_s)
+        return (k1, k2)
+
+    def get_neighbors(self, y,x):
+        neighbors = []
+        for dy,dx in [(-1,0),(1,0),(0,-1),(0,1)]:
+            ny, nx = y+dy, x+dx
+            if 0<=nx<self.width and 0<=ny<self.height:
+                neighbors.append((ny,nx))
+        return neighbors
+
+    def update_vertex(self, s):
+        y,x = s
+        if s != self.goal:
+            self.rhs[y,x] = min([self.cost[ny,nx] + self.g[ny,nx] for ny,nx in self.get_neighbors(y,x)])
+        if any(item[1] == s for item in self.U):
+            self.U = [(k,v) for k,v in self.U if v != s]
+            heapify(self.U)
+        if self.g[y,x] != self.rhs[y,x]:
+            heappush(self.U, (self.calculate_key(s), s))
+
+    def compute_shortest_path(self):
+        while self.U:
+            k_old, u = heappop(self.U)
+            k_new = self.calculate_key(u)
+            if k_old < k_new:
+                heappush(self.U, (k_new, u))
+            elif self.g[u] > self.rhs[u]:
+                self.g[u] = self.rhs[u]
+                for n in self.get_neighbors(*u):
+                    self.update_vertex(n)
+            else:
+                g_old = self.g[u]
+                self.g[u] = np.inf
+                self.update_vertex(u)
+                for n in self.get_neighbors(*u):
+                    self.update_vertex(n)
+
+
 class FireTractorEnv:
     def __init__(
         self,
@@ -37,6 +96,8 @@ class FireTractorEnv:
         wind_speed=15.0,
         wind_dir=90.0,
         cell_size=10.0,
+        min_dist = 1, # random, set to 60 feet
+        max_dist = 5, # random, set to 120 feet
     ):
         self.rng = np.random.default_rng(seed)
 
@@ -52,10 +113,10 @@ class FireTractorEnv:
             burn_duration=burn_duration,
         )
 
-        # Grid information
-        self.burning = np.zeros((height, width), dtype=bool)
-        self.burned  = np.zeros((height, width), dtype=bool)
-        self.fuel    = np.ones((height, width), dtype=bool)
+        # DStarLite info
+        self.goal_region = [(x, self.height - 1) for x in range(self.width)]
+        self.min_dist = min_dist
+        self.max_dist = max_dist
 
         # Bookkeeping
         self.current_time = 0.0
@@ -102,32 +163,65 @@ class FireTractorEnv:
 
         self.tractor = Tractor(start_x=int(sx), start_y=int(sy), direction=direction, speed=1)
 
+        # pick a goal from goal region
+        self.goal = random.choice(self.goal_region)
+
+        # start Dstarlite
+        start = (self.tractor.y, self.tractor.x)
+        self.dstar = DStarLite(self.grid.width, self.grid.height, start, self.goal)
+        self.dstar.update_vertex(self.goal)
+
         info = self._get_info(done=False)
         return info
 
+    def compute_cost_map(self):
+        fire_mask = self.grid.burning | self.grid.burned
+        dist_to_fire = distance_transform_edt(~fire_mask)
+        cost = np.ones((self.height, self.width))
+        cost[fire_mask] = np.inf
+        cost[dist_to_fire > self.max_dist] += 100  # penalty for too far, change as needed
+        cost[dist_to_fire < self.min_dist] = np.inf # penalty for too close, change as needed
+        self.dstar.cost = cost
+        for y in range(self.height):
+            for x in range(self.width):
+                self.dstar.update_vertex((y,x))
 
     def step(self, action: int, dt: float = 1.0):
         """
         Applies an action (if tractor still active), advances fire, updates states.
-        Returns (obs, reward, done, truncated, info).
+        Returns (done, truncated, info).
         """
         self.step_idx += 1
         self.current_time += dt
 
-        # 1) Tractor move (only if active)
         tx, ty = self.tractor.x, self.tractor.y
         done = False  # <-- track early termination
 
+        # 1) Step fire
+        self.fire.step(self.grid, dt=dt)  # update .burning and advance ignite_time
+
+        # 2) Update DStarLight
+        self.compute_cost_map()
+        self.dstar.start = (ty, tx) # start from tractor position
+        self.dstar.km += self.dstar.heuristic(self.dstar.last, self.dstar.start)
+        self.dstar.last = self.dstar.start
+        self.goal = self._nearest_goal() # update to nearest goal point
+        self.dstar.compute_shortest_path()
+
+        # 3) Move tractor (currently unintuitive, but place tractor on next cell)
         if self.tractor_active:
-            if action == 1:   self.tractor.direction = "up"
-            elif action == 2: self.tractor.direction = "down"
-            elif action == 3: self.tractor.direction = "left"
-            elif action == 4: self.tractor.direction = "right"
-            # 0 = noop
+            # decide on next cell for tractor to move to
+            neighbors = self.dstar.get_neighbors(ty, tx)
+            valid_neighbors = [(ny,nx) for ny,nx in neighbors if self.dstar.cost[ny,nx] < np.inf]
+            if not valid_neighbors: 
+                next_cell = (self.tractor.y, self.tractor.x) # no options to move to, tractor stays put
+            else: 
+                next_cell = min(valid_neighbors, key=lambda n: self.dstar.g[n[0], n[1]] + self.dstar.cost[n])
 
-            self.tractor.move(self.width, self.height)  # must NOT clamp inside
+            # move to that cell
+            self.tractor.y, self.tractor.x = next_cell
             tx, ty = self.tractor.x, self.tractor.y
-
+        
             # Leaving farm -> tractor disappears; fire keeps running
             if tx < 0 or ty < 0 or tx >= self.width or ty >= self.height:
                 self.tractor_active = False
@@ -143,16 +237,13 @@ class FireTractorEnv:
                 else:
                     # Make firebreak (unburnable)
                     self._make_firebreak(tx, ty)
-                    self.tractor_path.add((ty, tx))
+                    self.tractor_path.add((ty, tx)) # keep track for color overlays
 
         # If tractor just died this step, end now (no more fire advance or rendering needed)
         if done:
             info = self._get_info(done=True)
             truncated = False
             return True, truncated, info
-
-        # 2) Advance fire model by dt
-        self.fire.step(self.grid, dt=dt)  # update .burning and advance ignite_time
 
         # 3) Enforce burned flag
         self._update_burned_flags()
@@ -246,6 +337,16 @@ class FireTractorEnv:
                 state[ty, tx] = STATE_TRACTOR
 
         return state
+    
+    def _nearest_goal(self):
+        min_dist = float('inf')
+        nearest = None
+        for gx, gy in self.goal_region:
+            dist = abs(self.tractor.x - gx) + abs(self.tractor.y - gy)
+            if dist < min_dist:
+                min_dist = dist
+                nearest = (gx, gy)
+        return nearest
 
     # -------- Summary info calculations --------
 
