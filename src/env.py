@@ -247,6 +247,7 @@ class FireTractorEnv:
             if tx == gx and ty == gy:
                 self.tractor_active = False
                 self.tractor_exited = True
+                
 
             else:
                 # 🔥☠️ Tractor dies on burning OR burned
