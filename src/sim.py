@@ -75,5 +75,5 @@ def run():
 if __name__ == "__main__":
     # run()  -> legacy 
     from env import FireTractorEnv
-    env = FireTractorEnv(width=100, height=100)
+    env = FireTractorEnv(width=50, height=50)
     env.demo()

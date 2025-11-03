@@ -51,9 +51,9 @@ class DStarLite:
 
     def get_neighbors(self, y,x):
         neighbors = []
-        for dy,dx in [(-1,0),(1,0),(0,-1),(0,1)]:
+        for dy,dx in [(-1,0),(1,0),(0,-1),(0,1)]: 
             ny, nx = y+dy, x+dx
-            if 0<=nx<self.width and 0<=ny<self.height:
+            if 0<=nx<self.width and 0<=ny<self.height: #allow us to leave the field
                 neighbors.append((ny,nx))
         return neighbors
 
@@ -156,7 +156,7 @@ class FireTractorEnv:
         # ---- Tractor start ----
         if tractor_start is None:
             sx = self.rng.integers(0, self.width)
-            sy = 0
+            sy = -1               # actually start at edge of graph 
             direction = "down"
         else:
             sx, sy, direction = tractor_start
@@ -164,11 +164,19 @@ class FireTractorEnv:
         self.tractor = Tractor(start_x=int(sx), start_y=int(sy), direction=direction, speed=1)
 
         # pick a goal from goal region
-        self.goal = random.choice(self.goal_region)
+        #self.goal = random.choice(self.goal_region)
 
         # start Dstarlite
         start = (self.tractor.y, self.tractor.x)
-        self.dstar = DStarLite(self.grid.width, self.grid.height, start, self.goal)
+        temp_goal = (self.height-1, self.width -1)
+        self.dstar = DStarLite(self.grid.width, self.grid.height, start, temp_goal)
+        self.dstar.update_vertex(temp_goal)
+        self.compute_cost_map()
+
+        # update and compute goal
+        self.goal = self._select_goal()
+        self.dstar.goal = self.goal
+        self.dstar.rhs[self.goal] = 0
         self.dstar.update_vertex(self.goal)
 
         info = self._get_info(done=False)
@@ -178,10 +186,11 @@ class FireTractorEnv:
         fire_mask = self.grid.burning | self.grid.burned
         dist_to_fire = distance_transform_edt(~fire_mask)
         cost = np.ones((self.height, self.width))
-        cost[fire_mask] = np.inf
-        cost[dist_to_fire > self.max_dist] += 100  # penalty for too far, change as needed
+        cost[fire_mask] = np.inf # don't touch the fire
+        cost[dist_to_fire > self.max_dist] += 5  # penalty for too far, change as needed
         cost[dist_to_fire < self.min_dist] = np.inf # penalty for too close, change as needed
         self.dstar.cost = cost
+        self.dist_to_fire = dist_to_fire
         for y in range(self.height):
             for x in range(self.width):
                 self.dstar.update_vertex((y,x))
@@ -205,25 +214,37 @@ class FireTractorEnv:
         self.dstar.start = (ty, tx) # start from tractor position
         self.dstar.km += self.dstar.heuristic(self.dstar.last, self.dstar.start)
         self.dstar.last = self.dstar.start
-        self.goal = self._nearest_goal() # update to nearest goal point
+        self.goal = self._select_goal() # update to nearest goal point
         self.dstar.compute_shortest_path()
 
         # 3) Move tractor (currently unintuitive, but place tractor on next cell)
         if self.tractor_active:
             # decide on next cell for tractor to move to
+            # bias toward moving toward goal
             neighbors = self.dstar.get_neighbors(ty, tx)
             valid_neighbors = [(ny,nx) for ny,nx in neighbors if self.dstar.cost[ny,nx] < np.inf]
-            if not valid_neighbors: 
-                next_cell = (self.tractor.y, self.tractor.x) # no options to move to, tractor stays put
-            else: 
-                next_cell = min(valid_neighbors, key=lambda n: self.dstar.g[n[0], n[1]] + self.dstar.cost[n])
+
+        if not valid_neighbors:
+            next_cell = (self.tractor.y, self.tractor.x)
+        else:
+            goal_y, goal_x = self.goal
+            # compute combined score: D* cost + safety cost + small forward bias
+            def score(n):
+                ny, nx = n
+                g_val = self.dstar.g[ny, nx]
+                cost_val = self.dstar.cost[ny, nx]
+                # forward bias: Manhattan distance to goal (smaller is better)
+                forward_bias = abs(goal_y - ny) + abs(goal_x - nx)
+                return g_val + cost_val + 0.01 * forward_bias  # 0.01 is a small weight
+            next_cell = min(valid_neighbors, key=score)
 
             # move to that cell
             self.tractor.y, self.tractor.x = next_cell
             tx, ty = self.tractor.x, self.tractor.y
         
-            # Leaving farm -> tractor disappears; fire keeps running
-            if tx < 0 or ty < 0 or tx >= self.width or ty >= self.height:
+            # If we reach the goal, we allow the tractor to leave (goal is on field boundary)
+            gx, gy = self.goal
+            if tx == gx and ty == gy:
                 self.tractor_active = False
                 self.tractor_exited = True
 
@@ -338,15 +359,25 @@ class FireTractorEnv:
 
         return state
     
-    def _nearest_goal(self):
-        min_dist = float('inf')
-        nearest = None
-        for gx, gy in self.goal_region:
-            dist = abs(self.tractor.x - gx) + abs(self.tractor.y - gy)
-            if dist < min_dist:
-                min_dist = dist
-                nearest = (gx, gy)
-        return nearest
+    def _select_goal(self):
+        # Tractor starts at top, goal is bottom row
+        goal_row = self.height - 1
+        candidate_cells = [(goal_row, x) for x in range(self.width)]
+
+        # Filter by safe distance buffer
+        safe_cells = [
+            (y, x) for y, x in candidate_cells
+            if self.min_dist <= self.dist_to_fire[y, x] <= self.max_dist
+        ]
+
+        if safe_cells:
+            # Pick the cell closest to fire
+            goal_cell = min(safe_cells, key=lambda c: self.dist_to_fire[c[0], c[1]])
+        else:
+            # fallback: any cell on the goal row
+            goal_cell = random.choice(candidate_cells)
+
+        return goal_cell
 
     # -------- Summary info calculations --------
 
