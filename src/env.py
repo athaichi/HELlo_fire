@@ -31,26 +31,17 @@ class FireTractorEnv:
         height=50,
         burn_duration=3.0,
         seed=None,
-        obs_patch_size=11,
-        rays_front=16,
-        rays_side=8,
         sense_radius=12,             # in cells
-        ray_stride=1,                # step in cells along ray
         moisture=0.05,
         wind_speed=15.0,
         wind_dir=90.0,
         cell_size=10.0,
     ):
-        assert obs_patch_size % 2 == 1, "obs_patch_size must be odd"
         self.rng = np.random.default_rng(seed)
 
         self.width = width
         self.height = height
-        self.obs_patch_size = obs_patch_size
-        self.rays_front = rays_front
-        self.rays_side = rays_side
         self.sense_radius = sense_radius
-        self.ray_stride = max(1, ray_stride)
 
         # Fire / physics
         self.fire = FireModel(
@@ -114,7 +105,7 @@ class FireTractorEnv:
     def step(self, action: int, dt: float = 1.0):
         """
         Applies an action (if tractor still active), advances fire, updates states.
-        Returns (obs, reward, done, truncated, info).
+        Returns (obs, done, truncated, info).
         """
         self.step_idx += 1
         self.current_time += dt
@@ -152,12 +143,11 @@ class FireTractorEnv:
 
         # If tractor just died this step, end now (no more fire advance or rendering needed)
         if done:
-            reward = 0.0
             obs = self._get_observation()
             info = self._get_info(done=True)
             truncated = False
             print("Tractor has died. Ending episode.")
-            return obs, reward, True, truncated, info
+            return obs, True, truncated, info
 
         # 2) Advance fire model by dt
         self.fire.step(self.grid, dt=dt)  # update .burning and advance ignite_time
@@ -168,15 +158,11 @@ class FireTractorEnv:
         # 4) Convergence detection (no more burning, etc.)
         done = self._converged()
         
-
-        # 5) Reward: + cells saved delta on this step (optional placeholder)
-        reward = 0.0  # TODO for RL; D* won’t use it.
-
         obs = self._get_observation()
         info = self._get_info(done=done)
 
         truncated = False
-        return obs, reward, done, truncated, info
+        return obs, done, truncated, info
 
     def render(self, block=False):
         """Matplotlib rendering; safe to call each step."""
@@ -201,7 +187,6 @@ class FireTractorEnv:
         if block: plt.show()
 
     # ------------- Internal helpers -------------
-
     def _make_firebreak(self, x, y):
         """Set a cell to permanent firebreak: unburnable and not counted as burned."""
         self.grid.fuel_type[y, x] = 0
@@ -234,10 +219,6 @@ class FireTractorEnv:
         # No active burning:
         if np.any(self.grid.burning): 
             return False
-        # Additionally, check last-step changes: simplest proxy—if nothing is burning now
-        # and FireModel won't schedule any future ignitions (ignite_time not decreasing),
-        # we consider it converged. As a safe heuristic: if burning==0 for two consecutive
-        # steps, you can track a counter. Here we do the simpler rule:
         return True
 
     def _build_state_map(self):
@@ -261,40 +242,69 @@ class FireTractorEnv:
         return state
 
     # -------- Partial Observations: Sensor --------
+    def _cell_code_from_world(self, x, y) -> int:
+        """Translate world cell to code {0..3} without tractor."""
+        if self.grid.burning[y, x]:
+            return STATE_BURNING
+        if self.grid.burned[y, x]:
+            return STATE_BURNED
+        if self.grid.fuel_type[y, x] == 0:  # plowed firebreak
+            return STATE_FIREBREAK
+        return STATE_EMPTY  # fuel present
+    
+
+    def _build_sensor_map_world_aligned(self, radius: int = 5) -> np.ndarray:
+        """
+        World-aligned (North=up) sensor map centered on tractor.
+        Values: -1 unknown/outside radius, else {0..3} matching state codes (no tractor).
+        """
+        size = 2 * radius + 1  # 11 if radius=5
+        smap = np.full((size, size), fill_value=-1, dtype=np.int8)
+
+        cx, cy = self.tractor.x, self.tractor.y
+        # if tractor inactive or off-map, still return -1 grid
+        if not (0 <= cx < self.width and 0 <= cy < self.height):
+            return smap
+
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                # circle mask (use Euclidean; switch to Manhattan if you prefer a diamond)
+                if dx*dx + dy*dy > radius * radius:
+                    continue
+                wx, wy = cx + dx, cy + dy
+                iy, ix = dy + radius, dx + radius  # map to [0..size-1]
+                # outside map -> unknown
+                if not (0 <= wx < self.width and 0 <= wy < self.height):
+                    smap[iy, ix] = -1
+                    continue
+                # look up world state, do NOT draw tractor
+                smap[iy, ix] = self._cell_code_from_world(wx, wy)
+
+        return smap
 
     def _get_observation(self):
         """
-        Returns a dict with:
-          - 'local_grid': (P x P) patch centered at tractor (integers: 0..3; -1 unknown outside map)
-          - 'sensor_front': (rays_front,) distances normalized to [0,1]
-          - 'sensor_side':  (rays_side,)  distances normalized to [0,1]
-          - 'pose': (x_norm, y_norm, dx, dy)  (simple heading as unit vector)
-        Both RL & D*
+        Returns:
+        - 'sensor_map': (11,11) int8 world-aligned (North=up), center = tractor, radius=5
+                        Values: -1=unknown, 0=fuel, 1=burning, 2=burned, 3=firebreak
+        - 'pose': (4,) float32 = [x_norm, y_norm, dx, dy]
         """
-        # Build a latent state map for local patch using visualization coding (without tractor):
-        dense = self._build_state_map()
-        dense[dense == STATE_TRACTOR] = STATE_EMPTY  # don’t leak tractor marker
+        sensor_map = self._build_sensor_map_world_aligned(radius=5)
 
-        # Local patch
-        patch = self._local_patch(dense, self.tractor.x, self.tractor.y, self.obs_patch_size)
-
-        # Ray sensors
-        front = self._ray_scan(angle_center=self._dir_to_angle(self.tractor.direction), n_rays=self.rays_front)
-        side  = self._ray_scan(angle_center=self._dir_to_angle(self.tractor.direction) + np.pi/2,
-                               n_rays=self.rays_side)
-
-        # Pose (normalized to [0,1] for pos; direction as unit vector)
-        # TODO: handle if we are placing sensors in various places
-        x_norm = np.clip(self.tractor.x / max(1, self.width - 1), 0, 1) if self.tractor_active else 0.0
-        y_norm = np.clip(self.tractor.y / max(1, self.height - 1), 0, 1) if self.tractor_active else 0.0
-        dx, dy = self._dir_to_vec(self.tractor.direction) if self.tractor_active else (0.0, 0.0)
+        # Pose (normalized position; heading as unit vector)
+        if self.tractor_active:
+            x_norm = float(np.clip(self.tractor.x / max(1, self.width - 1), 0, 1))
+            y_norm = float(np.clip(self.tractor.y / max(1, self.height - 1), 0, 1))
+            dx, dy = self._dir_to_vec(self.tractor.direction)
+        else:
+            x_norm = y_norm = 0.0
+            dx = dy = 0.0
 
         return {
-            "local_grid": patch.astype(np.int8),          # shape (P,P); values in {-1,0,1,2,3}
-            "sensor_front": front.astype(np.float32),     # shape (rays_front,), 0..1
-            "sensor_side":  side.astype(np.float32),      # shape (rays_side,),   0..1
+            "sensor_map": sensor_map,  # int8 in {-1,0,1,2,3}
             "pose": np.array([x_norm, y_norm, dx, dy], dtype=np.float32),
         }
+
 
     def _get_info(self, done: bool):
         total = self.width * self.height
@@ -324,34 +334,6 @@ class FireTractorEnv:
                     patch[j, i] = dense_map[y, x]
         return patch
 
-    def _ray_scan(self, angle_center, n_rays):
-        """
-        Cast n_rays over 180° FOV centered at angle_center.
-        Return distances to nearest 'blocking' or 'fire' feature normalized by sense_radius.
-        Blocking here = boundary or burned/firebreak; you can tweak what rays see.
-        """
-        dists = np.full(n_rays, self.sense_radius, dtype=float)
-        half = np.pi / 2  # 180° total
-        angles = np.linspace(angle_center - half, angle_center + half, n_rays)
-
-        for i, ang in enumerate(angles):
-            for step in range(1, self.sense_radius + 1, self.ray_stride):
-                x = int(round(self.tractor.x + step * np.cos(ang)))
-                y = int(round(self.tractor.y + step * np.sin(ang)))
-                # Out of bounds -> hit
-                if not (0 <= x < self.width and 0 <= y < self.height):
-                    dists[i] = step
-                    break
-                # Decide what counts as a "hit":
-                # e.g., burning OR burned OR firebreak (obstacle to future spread/tractor)
-                if self.grid.burning[y, x] or self.grid.burned[y, x] or (self.grid.fuel_type[y, x] == 0):
-                    dists[i] = step
-                    break
-
-        # Normalize to [0,1]
-        dists = np.clip(dists / max(1, self.sense_radius), 0.0, 1.0)
-        return dists
-
     def _dir_to_angle(self, direction: str) -> float:
         if direction in ("up", "w"):    return -np.pi / 2
         if direction in ("down", "s"):  return  np.pi / 2
@@ -364,7 +346,6 @@ class FireTractorEnv:
         return float(np.cos(ang)), float(np.sin(ang))
 
     # ------------- DEMO MODE -------------
-
     def demo(self, fire_start=None, tractor_start=None, max_steps=500, pause=0.4):
         import time
         import matplotlib.pyplot as plt
@@ -376,30 +357,52 @@ class FireTractorEnv:
         time.sleep(pause)
 
         for _ in range(max_steps):
-            action = 2  # straight down
+            # Demo policy – replace with model action if testing RL
+            action = 2
             obs, reward, done, truncated, info = self.step(action)
-
-            # If tractor died, stop immediately (no more rendering)
-            if self.tractor_dead:
-                break
 
             self.render(block=False)
             time.sleep(pause)
 
+            # If tractor no longer active, switch to fire-only rollout
+            if self.tractor_dead or self.tractor_exited:
+                print("🚜 Tractor stopped — rolling fire to completion...")
+                self.roll_fire_to_completion()
+                break
+
+            # If simulation ends normally
             if done:
                 break
 
         # -------- Summary --------
         total = self.width * self.height
-        burned = int(np.sum(self.grid.burned))  # use burned mask
+        burned = int(np.sum(self.grid.burned))
         firebreak = len(self.tractor_path)
-        saved = total - burned  # firebreak counts as saved
+        saved = total - burned
 
         survived = (self.tractor_exited or (self.tractor_active and not self.tractor_dead))
         print("\n===== DEMO RESULTS =====")
-        print(f"🌱 Saved land:       {saved}")
+        print(f"🌱 Saved land:       {saved}/{total}")
         print(f"🔥 Burned land:      {burned}")
         print(f"🟪 Firebreak cells:  {firebreak}")
         print(f"🚜 Tractor survived: {'Yes' if survived else 'No'}")
         print(f"⏱️ Duration:         {self.fire.current_time:.1f} min")
         print("========================\n")
+
+    def roll_fire_to_completion(self):
+        """
+        Continue simulating fire (without tractor movement) until all burning stops.
+        Returns number of fire steps simulated.
+        """
+        steps = 0
+        while np.any(self.grid.burning):
+            self.fire.step(self.grid, dt=1.0)
+            self._update_burned_flags()
+            steps += 1
+
+        # Debug print
+        print(
+            f"[FireRoll] burn_finished={np.sum(self.grid.burned)} | "
+            f"ignited={np.isfinite(self.grid.ignite_time).sum()} | steps={steps}"
+        )
+        return steps
