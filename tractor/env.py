@@ -50,7 +50,7 @@ class FireTractorEnv:
 
     # ------------- Core Loop -------------
 
-    def reset(self, fire_start=None, tractor_start=None):
+    def reset(self, fire_start=None, tractor_start=None, route=None):
         self.grid = generate_soybean_farm(width=self.width, height=self.height)
         self.fire.current_time = 0.0
 
@@ -67,12 +67,17 @@ class FireTractorEnv:
         else:
             sx, sy, direction = tractor_start
 
+        self._make_firebreak(sx, sy)
+
         self.tractor = Tractor(start_x=sx, start_y=sy, direction=direction, speed=1)
         self.tractor_active = True
         self.tractor_dead = False
         self.tractor_exited = False
         self.tractor_path = set()
-        self.route = self._make_default_l_route()
+        if route == None:
+            self.route = self._make_default_l_route()
+        else:
+            self.route = route
         self.route_index = 0
 
         obs = self._get_observation()
@@ -88,7 +93,7 @@ class FireTractorEnv:
         if tx < 0 or ty < 0 or tx >= self.width or ty >= self.height:
             self.tractor_exited = True
             self.tractor_active = False
-            done = True
+            # done = True
         elif self.grid.burning[ty, tx] or self.grid.burned[ty, tx]:
             self.tractor_dead = True
             self.tractor_active = False
@@ -124,8 +129,15 @@ class FireTractorEnv:
         ax.imshow(state, cmap=cmap, interpolation="nearest", alpha=0.7)
 
         if self.route:
+            # Draw full route in cyan
             rx, ry = zip(*self.route)
             ax.plot(rx, ry, linestyle='--', linewidth=1.0, color='cyan', alpha=0.7)
+
+            # Highlight current target waypoint
+            i = int(self.route_index)
+            if 0 <= i < len(self.route):
+                gx, gy = self.route[i]
+                ax.plot(gx, gy, "yo", markersize=8, label="Current waypoint")  # 🟡 Yellow dot
 
         ax.set_title(
             f"Mode: {getattr(self.tractor, 'mode', '?')} | "
@@ -143,70 +155,86 @@ class FireTractorEnv:
         y_mid = self.height // 3
         horizontal = [(x, y_mid) for x in range(2, self.width - 2)]
         return vertical + horizontal
+    
+    def _is_uturn(self, i):
+        """Check if route[i-1] → route[i] → route[i+1] forms a U-turn (sharp angle)."""
+        if i <= 0 or i >= len(self.route) - 1:
+            return False
+        x0, y0 = self.route[i - 1]
+        x1, y1 = self.route[i]
+        x2, y2 = self.route[i + 1]
+        v1 = np.array([x1 - x0, y1 - y0])
+        v2 = np.array([x2 - x1, y2 - y1])
+        if np.linalg.norm(v1) == 0 or np.linalg.norm(v2) == 0:
+            return False
+        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+        angle_deg = np.degrees(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
+        print(f"Angle at route index {i}: {angle_deg:.1f}°")
+        return angle_deg > 90  # treat >135° as U-turn
+
 
     def _next_route_action(self, obs=None):
-        """
-        Follow the next route waypoint while avoiding nearby fire.
-        - Keeps moving toward the next goal cell.
-        - If fire is visible, biases movement away from the side with more flames.
-        """
+        """Always move closer to the next waypoint; never increase distance."""
         if not self.route or not self.tractor_active:
             return 0
 
         tx, ty = self.tractor.x, self.tractor.y
-        gx, gy = self.route[self.route_index]
+        i = int(np.clip(self.route_index, 0, len(self.route) - 1))
+        gx, gy = self.route[i]
 
-        # Advance to next waypoint regardless
-        self.route_index += 1
-        if self.route_index >= len(self.route):
+        # --- Advance index when we're basically at waypoint ---
+        if np.hypot(gx - tx, gy - ty) < 1.0:
+            self.route_index = min(i + 1, len(self.route) - 1)
+            gx, gy = self.route[self.route_index]
+
+        # --- Evaluate all possible moves ---
+        moves = {
+            1: (tx, ty - 1),  # up
+            2: (tx, ty + 1),  # down
+            3: (tx - 1, ty),  # left
+            4: (tx + 1, ty),  # right
+        }
+
+        # Compute current distance
+        current_dist = np.hypot(gx - tx, gy - ty)
+
+        # Among moves that reduce distance, pick the best one
+        best_action, best_dist = None, float("inf")
+        for action, (nx, ny) in moves.items():
+            if not (0 <= nx < self.width and 0 <= ny < self.height):
+                continue
+            new_dist = np.hypot(gx - nx, gy - ny)
+            if new_dist < current_dist and new_dist < best_dist:
+                best_action, best_dist = action, new_dist
+
+        if best_action is None:
+            # already as close as possible
             return 0
-        gx, gy = self.route[self.route_index]
 
-        dx, dy = gx - tx, gy - ty
-        if abs(dx) <= 0 and abs(dy) <= 0:
-            print("At final waypoint, no action.")
-            return 0
-
-        # --- Base direction toward goal ---
-        if abs(dx) > abs(dy):
-            base_action = 4 if dx > 0 else 3  # right / left
-        else:
-            base_action = 2 if dy > 0 else 1  # down / up
-
-        # --- Fire-aware correction ---
+        # --- Optional: bias away from fire but never pick a move that increases distance ---
         if obs is not None:
             smap = obs["sensor_map"]
             fire_mask = (smap == 1) | (smap == 2)
             if np.any(fire_mask):
-                center = smap.shape[0] // 2
-                top_fire = np.sum(fire_mask[:center, :])
-                bottom_fire = np.sum(fire_mask[center+1:, :])
-                left_fire = np.sum(fire_mask[:, :center])
-                right_fire = np.sum(fire_mask[:, center+1:])
+                c = smap.shape[0] // 2
+                top_fire = np.sum(fire_mask[:c, :])
+                bottom_fire = np.sum(fire_mask[c+1:, :])
+                left_fire = np.sum(fire_mask[:, :c])
+                right_fire = np.sum(fire_mask[:, c+1:])
 
-                # Determine safer lateral direction
-                safer_up = top_fire < bottom_fire
-                safer_left = left_fire < right_fire
+                # Adjust preference if multiple "closer" options exist
+                if best_action in (4, 3):  # moving horizontally
+                    if top_fire > bottom_fire * 1.3:
+                        return 2 if 2 in moves else best_action  # prefer down
+                    elif bottom_fire > top_fire * 1.3:
+                        return 1 if 1 in moves else best_action
+                elif best_action in (1, 2):  # moving vertically
+                    if left_fire > right_fire * 1.3:
+                        return 4 if 4 in moves else best_action
+                    elif right_fire > left_fire * 1.3:
+                        return 3 if 3 in moves else best_action
 
-                # Adjust base action only slightly (avoid reversing)
-                if base_action in (4, 3):  # moving horizontally
-                    if not safer_up:
-                        # prefer down if more fire above
-                        print("down")
-                        return 2
-                    elif safer_up and bottom_fire > top_fire * 1.5:
-                        print("up")
-                        return 1  # only if big difference
-                elif base_action in (1, 2):  # moving vertically
-                    if not safer_left:
-                        print("right")
-                        # prefer right if more fire on left
-                        return 4
-                    elif safer_left and right_fire > left_fire * 1.5:
-                        print("left")
-                        return 3
-
-        return base_action
+        return best_action
 
 
     def _apply_action(self, action):
