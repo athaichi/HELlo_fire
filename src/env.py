@@ -179,7 +179,7 @@ class FireTractorEnv:
         self._update_waypoints()
 
         # update and compute goal
-        self.goal = self._select_goal()
+        self.goal, self.current_goal_dir = self._select_goal()
         self.dstar.goal = self.goal
         self.dstar.rhs[self.goal] = 0
         self.dstar.update_vertex(self.goal)
@@ -233,9 +233,10 @@ class FireTractorEnv:
 
             new_waypoints[dir_name] = tuple(safe_cells[idx])
 
+        # make sure to update selected goal waypoint
+        if hasattr(self, 'current_goal_dir') and self.current_goal_dir in new_waypoints:
+            self.goal = new_waypoints[self.current_goal_dir]
         self.waypoints = new_waypoints
-    
-        print(self.waypoints)
 
     def step(self, action: int, dt: float = 1.0):
         """
@@ -251,23 +252,50 @@ class FireTractorEnv:
         # 1) Step fire
         self.fire.step(self.grid, dt=dt)  # update .burning and advance ignite_time
 
-        # 2) Update DStarLight
+        # 2) Update distances and goal
         self.compute_cost_map()
+        self._update_waypoints()
+        if not hasattr(self, 'visited_waypoints'):
+            self.visited_waypoints = set()
+
+        # update goal if needed
+        if (not hasattr(self, "goal") or self.goal is None
+            or self.grid.burning[self.goal[0], self.goal[1]]
+            or self.grid.burned[self.goal[0], self.goal[1]]):
+            # Select next unvisited safe waypoint
+            self.goal = None
+            for dir_name, (wy, wx) in self.waypoints.items():
+                if dir_name not in self.visited_waypoints:
+                    if not self.grid.burning[wy, wx] and not self.grid.burned[wy, wx]:
+                        self.goal = (wy, wx)
+                        self.current_goal_dir = dir_name
+                        break
+
+        print(self.current_goal_dir)
+        # If no safe waypoint left, stop the tractor <- FIX THIS (both success and failure position)
+        if self.goal is None:
+            self.tractor_active = False
+            done = True
+            info = self._get_info(done=True)
+            return done, False, info
+
+        # 3) Update Dstar
         self.dstar.start = (ty, tx) # start from tractor position
         self.dstar.km += self.dstar.heuristic(self.dstar.last, self.dstar.start)
         self.dstar.last = self.dstar.start
-        self.goal = self._select_goal() # update to nearest goal point
+        self.dstar.goal = self.goal
         self.dstar.compute_shortest_path()
 
-        # 3) Move tractor (currently unintuitive, but place tractor on next cell)
+        # 4) Move tractor (currently unintuitive, but place tractor on next cell)
         if self.tractor_active:
             # decide on next cell for tractor to move to
             # bias toward moving toward goal
             neighbors = self.dstar.get_neighbors(ty, tx)
-            valid_neighbors = [(ny,nx) for ny,nx in neighbors if self.dstar.cost[ny,nx] < np.inf]
+            valid_neighbors = [(ny,nx) for ny,nx in neighbors if self.dstar.cost[ny,nx] < np.inf
+                               and not self.grid.burning[ny,nx] and not self.grid.burned[ny,nx]]
 
         if not valid_neighbors:
-            next_cell = (self.tractor.y, self.tractor.x)
+            next_cell = (self.tractor.y, self.tractor.x) # trapped tractor
         else:
             goal_y, goal_x = self.goal
             # compute combined score: D* cost + safety cost + small forward bias
@@ -284,46 +312,43 @@ class FireTractorEnv:
             self.tractor.y, self.tractor.x = next_cell
             tx, ty = self.tractor.x, self.tractor.y
         
-            # Check if a waypoint was reached
-            for direction, (wy, wx) in list(self.waypoints.items()):
-                if (ty, tx) == (wy, wx):
-                    self.visited_waypoints.add(direction)
-                    print(f"✅ Waypoint {direction} reached!")
+            # 5) Check if reached waypoint
+            if (ty, tx) == self.goal:
+                self.visited_waypoints.add(self.current_goal_dir)
+                print(f"✅ Waypoint {self.current_goal_dir} reached!")
+                self.goal = None # Force next goal selection on step
 
-            # Mission success if all safe waypoints visited
+            # 6) 🔥☠️ Tractor dies on burning OR burned
+            if self.grid.burning[ty, tx] or self.grid.burned[ty, tx]:
+                self.tractor_active = False
+                self.tractor_dead = True
+                done = True  # end episode immediately
+
+            else:
+                # Make firebreak (unburnable)
+                self._make_firebreak(tx, ty)
+                self.tractor_path.add((ty, tx)) # keep track for color overlays
+            
+            # 7) Check mission status
             if all(k in self.visited_waypoints for k in self.waypoints.keys()):
                 self.tractor_active = False
                 self.tractor_exited = True
-                # TODO: have tractor exit field
                 print("🎯 All waypoints reached! Mission complete.")
-                
-
-            else:
-                # 🔥☠️ Tractor dies on burning OR burned
-                if self.grid.burning[ty, tx] or self.grid.burned[ty, tx]:
-                    self.tractor_active = False
-                    self.tractor_dead = True
-                    done = True  # end episode immediately
-
-                else:
-                    # Make firebreak (unburnable)
-                    self._make_firebreak(tx, ty)
-                    self.tractor_path.add((ty, tx)) # keep track for color overlays
 
         # If tractor just died this step, end now (no more fire advance or rendering needed)
         if done:
             info = self._get_info(done=True)
             truncated = False
             return True, truncated, info
-
-        # 3) Enforce burned flag
+        
+        # 8) Enforce burned flag
         self._update_burned_flags()
 
-        # 4) Convergence detection (no more burning, etc.)
-        done = self._converged()
+        # 9) Convergence detection (no more burning, etc.)
+        if not done: 
+            done = self._converged()
 
         info = self._get_info(done=done)
-
         truncated = False
         return done, truncated, info
 
@@ -423,12 +448,12 @@ class FireTractorEnv:
         # Filter out visited waypoints
         remaining = {k: v for k, v in self.waypoints.items() if k not in self.visited_waypoints}
         if not remaining:
-            return None  # mission complete
+            return None, None  # mission complete
 
         # Pick the closest remaining waypoint (Manhattan distance)
         ty, tx = self.tractor.y, self.tractor.x
-        goal = min(remaining.values(), key=lambda p: abs(p[0]-ty) + abs(p[1]-tx))
-        return goal
+        direction, pos = min(remaining.items(), key=lambda item: abs(item[1][0]-ty) + abs(item[1][1]-tx))
+        return pos, direction
 
     # -------- Summary info calculations --------
 
