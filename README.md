@@ -94,8 +94,14 @@ python3 sim.py
 * mapgen.py # farm map generator
 * sim.py # example run legacy
 
-Next Steps
+## Next Steps
 
 - D* planner integration into DQN model
 - RL reward design + Gym wrapper
 - Fuel model variations (beyond soy)
+
+## Todo: 
+- Fix waypointing so that they don't just randomly wander off when reach grid edge
+- Fix tractor ending --> exit field upon reaching end of waypoints
+- Figure out a way to determine of a waypoint is cornered in by the fire (unreachable) and remove it from waypoint direction list
+- 
