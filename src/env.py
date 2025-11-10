@@ -96,8 +96,8 @@ class FireTractorEnv:
         wind_speed=15.0,
         wind_dir=90.0,
         cell_size=10.0,
-        min_dist = 1, # random, set to 60 feet
-        max_dist = 5, # random, set to 120 feet
+        min_dist = 5, # random, set to 60 feet
+        max_dist = 10, # random, set to 120 feet
     ):
         self.rng = np.random.default_rng(seed)
 
@@ -117,6 +117,8 @@ class FireTractorEnv:
         self.goal_region = [(x, self.height - 1) for x in range(self.width)]
         self.min_dist = min_dist
         self.max_dist = max_dist
+        self.waypoints = []
+        self.visited_waypoints = set()
 
         # Bookkeeping
         self.current_time = 0.0
@@ -153,6 +155,8 @@ class FireTractorEnv:
             ix, iy = fire_start
         self.grid.ignite(ix, iy, time=0.0)
 
+        self.fire_origin = (iy, ix)
+
         # ---- Tractor start ----
         if tractor_start is None:
             sx = self.rng.integers(0, self.width)
@@ -163,15 +167,16 @@ class FireTractorEnv:
 
         self.tractor = Tractor(start_x=int(sx), start_y=int(sy), direction=direction, speed=1)
 
-        # pick a goal from goal region
-        #self.goal = random.choice(self.goal_region)
-
         # start Dstarlite
         start = (self.tractor.y, self.tractor.x)
         temp_goal = (self.height-1, self.width -1)
+
         self.dstar = DStarLite(self.grid.width, self.grid.height, start, temp_goal)
         self.dstar.update_vertex(temp_goal)
         self.compute_cost_map()
+
+        # start waypoints
+        self._update_waypoints()
 
         # update and compute goal
         self.goal = self._select_goal()
@@ -183,7 +188,7 @@ class FireTractorEnv:
         return info
 
     def compute_cost_map(self):
-        fire_mask = self.grid.burning | self.grid.burned
+        fire_mask = self.grid.burning 
         dist_to_fire = distance_transform_edt(~fire_mask)
         cost = np.ones((self.height, self.width))
         cost[fire_mask] = np.inf # don't touch the fire
@@ -194,6 +199,43 @@ class FireTractorEnv:
         for y in range(self.height):
             for x in range(self.width):
                 self.dstar.update_vertex((y,x))
+    
+    def _update_waypoints(self):
+        fire_mask = self.grid.burning | self.grid.burned
+        dist_to_fire = self.dist_to_fire
+
+        new_waypoints = {}
+        visited = getattr(self, "visited_waypoints", set())
+
+        for dir_name in ["N", "S", "W", "E"]:
+            if dir_name in visited:
+                continue
+
+            # Find all safe cells in grid
+            safe_cells = np.argwhere(
+                (~fire_mask) & (dist_to_fire >= self.min_dist) & (dist_to_fire <= self.max_dist)
+            )
+
+            if safe_cells.size == 0:
+                print(f"⚠️ Waypoint {dir_name} lost — no safe cell remaining.")
+                continue
+
+            # Pick a preferred cell based on direction
+            # N -> smallest y, S -> largest y, W -> smallest x, E -> largest x
+            if dir_name == "N":
+                idx = np.argmin(safe_cells[:, 0])
+            elif dir_name == "S":
+                idx = np.argmax(safe_cells[:, 0])
+            elif dir_name == "W":
+                idx = np.argmin(safe_cells[:, 1])
+            else:  # E
+                idx = np.argmax(safe_cells[:, 1])
+
+            new_waypoints[dir_name] = tuple(safe_cells[idx])
+
+        self.waypoints = new_waypoints
+    
+        print(self.waypoints)
 
     def step(self, action: int, dt: float = 1.0):
         """
@@ -242,11 +284,18 @@ class FireTractorEnv:
             self.tractor.y, self.tractor.x = next_cell
             tx, ty = self.tractor.x, self.tractor.y
         
-            # If we reach the goal, we allow the tractor to leave (goal is on field boundary)
-            gx, gy = self.goal
-            if tx == gx and ty == gy:
+            # Check if a waypoint was reached
+            for direction, (wy, wx) in list(self.waypoints.items()):
+                if (ty, tx) == (wy, wx):
+                    self.visited_waypoints.add(direction)
+                    print(f"✅ Waypoint {direction} reached!")
+
+            # Mission success if all safe waypoints visited
+            if all(k in self.visited_waypoints for k in self.waypoints.keys()):
                 self.tractor_active = False
                 self.tractor_exited = True
+                # TODO: have tractor exit field
+                print("🎯 All waypoints reached! Mission complete.")
                 
 
             else:
@@ -294,6 +343,10 @@ class FireTractorEnv:
         # Overlay states
         cmap = ListedColormap(["none", "red", "black", "purple", "gold"])
         ax.imshow(state, cmap=cmap, interpolation="nearest", alpha=0.7)
+
+        # Overlay waypoints
+        for direction, (wy, wx) in self.waypoints.items():
+            ax.plot(wx, wy, marker='o', color='cyan' if direction not in self.visited_waypoints else 'green', markersize=6)
 
         # Title
         ax.set_title(f"t = {self.fire.current_time:.1f} min  |  burning={int(self.grid.burning.sum())}")
@@ -361,24 +414,21 @@ class FireTractorEnv:
         return state
     
     def _select_goal(self):
-        # Tractor starts at top, goal is bottom row
-        goal_row = self.height - 1
-        candidate_cells = [(goal_row, x) for x in range(self.width)]
+        """
+        Pick the next active waypoint that is still safe and not yet visited.
+        """
+        # Recompute dynamic waypoints each step
+        self._update_waypoints()
 
-        # Filter by safe distance buffer
-        safe_cells = [
-            (y, x) for y, x in candidate_cells
-            if self.min_dist <= self.dist_to_fire[y, x] <= self.max_dist
-        ]
+        # Filter out visited waypoints
+        remaining = {k: v for k, v in self.waypoints.items() if k not in self.visited_waypoints}
+        if not remaining:
+            return None  # mission complete
 
-        if safe_cells:
-            # Pick the cell closest to fire
-            goal_cell = min(safe_cells, key=lambda c: self.dist_to_fire[c[0], c[1]])
-        else:
-            # fallback: any cell on the goal row
-            goal_cell = random.choice(candidate_cells)
-
-        return goal_cell
+        # Pick the closest remaining waypoint (Manhattan distance)
+        ty, tx = self.tractor.y, self.tractor.x
+        goal = min(remaining.values(), key=lambda p: abs(p[0]-ty) + abs(p[1]-tx))
+        return goal
 
     # -------- Summary info calculations --------
 
