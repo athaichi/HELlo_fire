@@ -26,7 +26,7 @@ class FireTractorEnv:
         width=50,
         height=50,
         burn_duration=3.0,
-        sense_radius=5,
+        sense_radius=4,
         moisture=0.05,
         wind_speed=15.0,
         wind_dir=90.0,
@@ -183,9 +183,11 @@ class FireTractorEnv:
         gx, gy = self.route[i]
 
         # --- Advance index when we're basically at waypoint ---
-        if np.hypot(gx - tx, gy - ty) < 1.0:
-            self.route_index = min(i + 1, len(self.route) - 1)
-            gx, gy = self.route[self.route_index]
+        #if np.hypot(gx - tx, gy - ty) < 1.0:
+        #    self.route_index = min(i + 1, len(self.route) - 1)
+        #    gx, gy = self.route[self.route_index]
+
+        self.route_index = i + 1
 
         # --- Evaluate all possible moves ---
         moves = {
@@ -225,13 +227,17 @@ class FireTractorEnv:
                 # Adjust preference if multiple "closer" options exist
                 if best_action in (4, 3):  # moving horizontally
                     if top_fire > bottom_fire * 1.3:
+                        print("down")
                         return 2 if 2 in moves else best_action  # prefer down
                     elif bottom_fire > top_fire * 1.3:
+                        print("up")
                         return 1 if 1 in moves else best_action
                 elif best_action in (1, 2):  # moving vertically
                     if left_fire > right_fire * 1.3:
+                        print("right")
                         return 4 if 4 in moves else best_action
                     elif right_fire > left_fire * 1.3:
+                        print("left")
                         return 3 if 3 in moves else best_action
 
         return best_action

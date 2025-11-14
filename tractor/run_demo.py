@@ -110,7 +110,7 @@ def get_user_route(width, height, fire_start, tractor_start):
     ax.plot(sx, sy, "go", markersize=8, label="Tractor start")
     ax.legend()
     plt.grid(True)
-    plt.pause(0.1)
+    plt.pause(0.05)
 
     print("🖱️ Click to define route points. Press Enter when finished.")
     raw_points = plt.ginput(n=-1, timeout=0)
@@ -123,7 +123,7 @@ def get_user_route(width, height, fire_start, tractor_start):
 
 if __name__ == "__main__":
     # Bigger world
-    env = FireTractorEnv(width=80, height=80)
+    env = FireTractorEnv(width=50, height=50)
 
     # Random fire start each run (but shown to user)
     fx = np.random.randint(env.width // 4, 3 * env.width // 4)
@@ -142,10 +142,12 @@ if __name__ == "__main__":
     # Main sim loop: tractor follows route; fire always spreads; stops when fire out
     for step in range(2000):
         action = env._next_route_action(obs=obs)
+        print(f"Step {step}: Action {action}")
         obs, done, truncated, info = env.step(action)
         env.render(block=False)
         if done:
             break
+        time.sleep(0.1)
 
     # ---- Final summary ----
     total = env.width * env.height
