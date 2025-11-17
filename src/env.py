@@ -155,8 +155,7 @@ class FireTractorEnv:
             ix, iy = fire_start
 
         # force ignition ppoints
-        ix = 5
-        iy = 30
+        #ix = 5 iy = 30
         self.grid.ignite(ix, iy, time=0.0)
 
         self.fire_origin = (iy, ix)
@@ -170,9 +169,7 @@ class FireTractorEnv:
             sx, sy, direction = tractor_start
 
         # fr testing, force start points
-        sx = 40
-        sy = -1
-        direction = "down"
+        #sx = 40 sy = -1 direction = "down"
         self.tractor = Tractor(start_x=int(sx), start_y=int(sy), direction=direction, speed=1)
 
         # start Dstarlite
@@ -286,10 +283,23 @@ class FireTractorEnv:
                 print(self.current_goal_dir)
 
             # OP 1: If no safe waypoint left, stop the tractor <- FIX THIS (both success and failure position)
+            # ---- NO SAFE WAYPOINTS LEFT: EXIT MODE ----
             if self.goal is None:
-                self.tractor_active = False
-                self.tractor_exited = True  # Fix This
-                print(f"Tractor exiting - no remaining goals")
+                print("Tractor entering exit mode - no remaining goals")
+                safe_edges = self._find_reachable_safe_exit(safety_radius=self.min_dist)
+                if safe_edges:
+                    # pick nearest safe edge
+                    nearest_exit = min(safe_edges, key=lambda c: abs(c[0]-ty) + abs(c[1]-tx))
+                    self.goal = nearest_exit
+                    self.current_goal_dir = "EXIT_EDGE"
+                    print(f"Tractor heading to exit at {nearest_exit}")
+                else:
+                    # trapped - no safe exit
+                    self.tractor_active = False
+                    self.tractor_exited = False
+                    self.tractor_dead = True
+                    print("⚠️ Tractor trapped: no safe edge to exit")
+                    return False, False, self._get_info(done=False)
 
             # OP 2: tractor can continue to a safe waypoint
             else:
@@ -308,7 +318,8 @@ class FireTractorEnv:
                 # THIS IS ONLY FOR THE CURRENT GOAL - A NON-GOAL WAYPOINT IS NOT CHECKED FOR REACHABILITY
                 if np.isinf(gy):
                     print(f"❌ Waypoint {self.current_goal_dir} unreachable → removed.")
-                    self.visited_waypoints.add(self.current_goal_dir)  # mark as "done" so it won't return
+                    if self.current_goal_dir != "EXIT_EDGE":
+                        self.visited_waypoints.add(self.current_goal_dir)  # mark as "done" so it won't return
                     self.goal = None
                     return False, False, self._get_info(done=False)
 
@@ -340,9 +351,14 @@ class FireTractorEnv:
 
                     # 5) Check if reached waypoint
                     if (ty, tx) == self.goal:
-                        self.visited_waypoints.add(self.current_goal_dir)
-                        print(f"✅ Waypoint {self.current_goal_dir} reached!")
-                        self.goal = None  # Force next goal selection on step
+                        if self.current_goal_dir == "EXIT_EDGE":
+                            print(f"🚜 Tractor exits at edge cell ({ty},{tx})")
+                            self.tractor_exited = True
+                            self.tractor_active = False
+                        else:
+                            self.visited_waypoints.add(self.current_goal_dir)
+                            print(f"✅ Waypoint {self.current_goal_dir} reached!")
+                            self.goal = None # force new goal on next step
 
                     # 6) 🔥☠️ Tractor dies on burning OR burned
                     if self.grid.burning[ty, tx] or self.grid.burned[ty, tx]:
@@ -355,17 +371,18 @@ class FireTractorEnv:
                         self.tractor_path.add((ty, tx))  # keep track for color overlays
 
                     # 7) Check mission status
-                    if all(k in self.visited_waypoints for k in self.waypoints.keys()) or self.waypoints == None:
-                        self.tractor_active = False
-                        self.tractor_exited = True
-                        print("🎯 All waypoints reached! Mission complete.")
+                    if all(k in self.visited_waypoints for k in self.waypoints.keys()) or self.waypoints is None:
+                        if self.tractor_exited == False: 
+                            print("🎯 All waypoints reached! Heading to exit next step.")
+                        else: 
+                            print("🎯 All waypoints reached and tractor exited! Mission complete.")
 
         # 8) Enforce burned flag
         self._update_burned_flags()
 
-        # 9) Convergence detection (no more burning, etc.)
+        # 9) Convergence detection (no more burning + tractor exited)
         if not done:
-            done = self._converged()
+            done = self._converged() and self.tractor_exited
 
         info = self._get_info(done=done)
         truncated = False
@@ -474,28 +491,35 @@ class FireTractorEnv:
         direction, pos = min(remaining.items(), key=lambda item: abs(item[1][0]-ty) + abs(item[1][1]-tx))
         return pos, direction
     
-    def _find_closest_edge(self, pos):
-        """
-        Returns the coordinates of the closest grid edge from current position.
-        Assumes grid has width and height attributes.
-        """
-        x, y = pos
-        distances = {
-            (x, 0): y,  # top edge
-            (x, self.grid.height - 1): self.grid.height - 1 - y,  # bottom edge
-            (0, y): x,  # left edge
-            (self.grid.width - 1, y): self.grid.width - 1 - x  # right edge
-        }
-        closest_edge = min(distances, key=distances.get)
-        return closest_edge
+    def _find_safe_exit_cells(self, safety_radius):
+        safe_edges = []
+        for y in range(self.height):
+            for x in range(self.width):
+                if y == 0 or y == self.height-1 or x == 0 or x == self.width-1:
+                    if not self.grid.burning[y, x] and not self.grid.burned[y, x]:
+                        # check distance to burning cells
+                        min_dist = np.min([
+                            abs(y - by) + abs(x - bx)
+                            for by, bx in zip(*np.where(self.grid.burning))
+                        ]) if np.any(self.grid.burning) else np.inf
+                        if min_dist >= safety_radius:
+                            safe_edges.append((y, x))
+        return safe_edges
+    
+    def _find_reachable_safe_exit(self, safety_radius):
+        """Return list of edge cells that are safe and reachable."""
+        safe_edges = self._find_safe_exit_cells(safety_radius)
+        reachable_edges = []
+        ty, tx = self.tractor.y, self.tractor.x
 
-
-    def _is_on_edge(self, pos):
-        """
-        Returns True if position is on any grid edge.
-        """
-        x, y = pos
-        return x == 0 or y == 0 or x == self.grid.width - 1 or y == self.grid.height - 1
+        for ey, ex in safe_edges:
+            # compute D* path cost from current tractor position
+            self.dstar.start = (ty, tx)
+            self.dstar.goal = (ey, ex)
+            self.dstar.compute_shortest_path()
+            if not np.isinf(self.dstar.g[ey, ex]):
+                reachable_edges.append((ey, ex))
+        return reachable_edges
 
     # -------- Summary info calculations --------
 
