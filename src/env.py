@@ -155,7 +155,7 @@ class FireTractorEnv:
             ix, iy = fire_start
 
         # force ignition ppoints
-        ix = 30
+        ix = 5
         iy = 30
         self.grid.ignite(ix, iy, time=0.0)
 
@@ -253,13 +253,12 @@ class FireTractorEnv:
         self.waypoints = new_waypoints
 
     def step(self, action: int, dt: float = 1.0):
-        """
-        Applies an action (if tractor still active), advances fire, updates states.
-        Returns (done, truncated, info).
+        """ 
+        Applies an action (if tractor still active), advances fire, updates states. 
+        Returns (done, truncated, info). 
         """
         self.step_idx += 1
         self.current_time += dt
-
         tx, ty = self.tractor.x, self.tractor.y
         done = False  # <-- track early termination
 
@@ -267,12 +266,11 @@ class FireTractorEnv:
         self.fire.step(self.grid, dt=dt)  # update .burning and advance ignite_time
 
         # ---- IF TRACTOR DEAD, EXIT HERE ----
-        if self.tractor_dead: 
+        if self.tractor_dead:
             return True, False, self._get_info(done=True)
-        
+
         # ---- IF TRACTOR ACTIVE, DO ALL LOGIC ----
         if self.tractor_active:
-
             # 2) Update distances and goal
             self.compute_cost_map()
             self._update_waypoints()
@@ -280,41 +278,23 @@ class FireTractorEnv:
                 self.visited_waypoints = set()
 
             # update goal if needed
-            if (not hasattr(self, "goal") or self.goal is None
-                or self.grid.burning[self.goal[0], self.goal[1]]
+            if (not hasattr(self, "goal") or self.goal is None 
+                or self.grid.burning[self.goal[0], self.goal[1]] 
                 or self.grid.burned[self.goal[0], self.goal[1]]):
                 # Select next unvisited safe waypoint
                 self.goal, self.current_goal_dir = self._select_goal()
+                print(self.current_goal_dir)
 
-            print(self.current_goal_dir)
+            # OP 1: If no safe waypoint left, stop the tractor <- FIX THIS (both success and failure position)
+            if self.goal is None:
+                self.tractor_active = False
+                self.tractor_exited = True  # Fix This
+                print(f"Tractor exiting - no remaining goals")
 
-            # OP 1: If no safe waypoint left, start exit mode
-            if self.goal is None and not getattr(self, 'exit_mode', False):
-                print(f"Tractor entering exit mode - no remaining goals")
-                ty, tx = self.tractor.y, self.tractor.x
-
-                # Find all safe edge cells
-                safe_edges = [(y, x) for y in range(self.height) for x in range(self.width)
-                            if (y == 0 or y == self.height-1 or x == 0 or x == self.width-1)
-                            and not self.grid.burning[y, x]
-                            and not self.grid.burned[y, x]]
-
-                if not safe_edges:
-                    print("⚠️ Tractor trapped: no safe edge cells")
-                    self.tractor_active = False
-                    self.tractor_exited = False
-                    self.tractor_dead = True
-                else:
-                    # Move to nearest edge
-                    self.exit_goal = min(safe_edges, key=lambda c: abs(c[0]-ty) + abs(c[1]-tx))
-                    self.exit_mode = True
-                    self.goal = self.exit_goal
-                    self.current_goal_dir = "EXIT_EDGE"
-            
             # OP 2: tractor can continue to a safe waypoint
-            else: 
+            else:
                 # 3) Update Dstar
-                self.dstar.start = (ty, tx) # start from tractor position
+                self.dstar.start = (ty, tx)  # start from tractor position
                 self.dstar.km += self.dstar.heuristic(self.dstar.last, self.dstar.start)
                 self.dstar.last = self.dstar.start
                 self.dstar.goal = self.goal
@@ -339,19 +319,9 @@ class FireTractorEnv:
                 valid_neighbors = [(ny,nx) for ny,nx in neighbors if self.dstar.cost[ny,nx] < np.inf
                                 and not self.grid.burning[ny,nx] and not self.grid.burned[ny,nx]]
 
-                if not valid_neighbors and getattr(self, 'exit_mode', False):
-                    # Move tractor toward exit_goal if stuck
-                    gy, gx = self.exit_goal
-                    dy = np.sign(gy - ty)
-                    dx = np.sign(gx - tx)
-                    self.tractor.y = ty + dy
-                    self.tractor.x = tx + dx
-                    ty, tx = self.tractor.y, self.tractor.x
-                
-                # TODO: add check for trapped tractor -> force exit mode to start
-                if not valid_neighbors: 
-                    ty, tx = self.tractor.y, self.tractor.x
-
+                if not valid_neighbors:
+                    next_cell = (self.tractor.y, self.tractor.x)  # trapped tractor
+                    # TODO: move tractor to nearest edge and exit
                 else:
                     goal_y, goal_x = self.goal
                     # compute combined score: D* cost + safety cost + small forward bias
@@ -367,44 +337,34 @@ class FireTractorEnv:
                     # move to that cell
                     self.tractor.y, self.tractor.x = next_cell
                     tx, ty = self.tractor.x, self.tractor.y
-                
+
                     # 5) Check if reached waypoint
                     if (ty, tx) == self.goal:
-                            self.visited_waypoints.add(self.current_goal_dir)
-                            print(f"✅ Waypoint {self.current_goal_dir} reached!")
-                            self.goal = None # Force next goal selection on step
-                     
-                    # Check if tractor reached exit
-                    if getattr(self, 'exit_mode', False) and (ty, tx) == self.exit_goal:
-                        print(f"🚜 Tractor exited at edge cell ({ty},{tx})")
-                        self.tractor_exited = True
-                        self.tractor_active = False
-                        self.exit_mode = False
+                        self.visited_waypoints.add(self.current_goal_dir)
+                        print(f"✅ Waypoint {self.current_goal_dir} reached!")
+                        self.goal = None  # Force next goal selection on step
 
                     # 6) 🔥☠️ Tractor dies on burning OR burned
                     if self.grid.burning[ty, tx] or self.grid.burned[ty, tx]:
                         self.tractor_active = False
-                        self.tractor_dead = True # end episode on next step
-                        done = True  
-
+                        self.tractor_dead = True  # end episode on next step
+                        done = True
                     else:
                         # Make firebreak (unburnable)
                         self._make_firebreak(tx, ty)
-                        self.tractor_path.add((ty, tx)) # keep track for color overlays
-                    
+                        self.tractor_path.add((ty, tx))  # keep track for color overlays
+
                     # 7) Check mission status
                     if all(k in self.visited_waypoints for k in self.waypoints.keys()) or self.waypoints == None:
-                        self.tractor_active = True
-                        self.tractor_exited = False
+                        self.tractor_active = False
+                        self.tractor_exited = True
                         print("🎯 All waypoints reached! Mission complete.")
 
-                   
-                            
         # 8) Enforce burned flag
         self._update_burned_flags()
 
         # 9) Convergence detection (no more burning, etc.)
-        if not done: 
+        if not done:
             done = self._converged()
 
         info = self._get_info(done=done)
