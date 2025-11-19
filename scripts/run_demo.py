@@ -1,8 +1,24 @@
 # run_demo.py
 import time
-from env import FireTractorEnv
-import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import sys, os
+
+# Add project root to Python path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# Import from src
+from src.env.env import FireTractorEnv
+
+print("PYTHONPATH:", sys.path)
+print("FILES IN PROJECT ROOT:", os.listdir(os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))))
+
+# Import from test
+from tests.test_case import TEST_CASES, save_final_png, save_summary_csv
+
+RESULT_DIR = "results"
+os.makedirs(RESULT_DIR, exist_ok=True)
+
 
 def bresenham_line(x0, y0, x1, y1):
     """Generate integer grid cells between (x0, y0) and (x1, y1)."""
@@ -96,8 +112,9 @@ def discretize_route(route_points, width, height):
     print(f"✅ Discretized route length: {len(final_route)}")
     return final_route
 
-def get_user_route(width, height, fire_start, tractor_start):
+def get_user_route(width, height, fire_start, tractor_start, wind_speed, wind_dir):
     import matplotlib.pyplot as plt
+    import numpy as np
 
     fig, ax = plt.subplots()
     ax.set_xlim(0, width)
@@ -106,8 +123,28 @@ def get_user_route(width, height, fire_start, tractor_start):
 
     fx, fy = fire_start
     sx, sy, _ = tractor_start
+
+    # Fire + Tractor
     ax.plot(fx, fy, "r*", markersize=12, label="Fire start")
     ax.plot(sx, sy, "go", markersize=8, label="Tractor start")
+
+    # --- WIND INDICATOR ---
+    if wind_speed > 0:
+        # wind_dir is degrees (0 = east, 90 = north, etc.)
+        rad = np.radians(wind_dir)
+        dx = np.cos(rad)
+        dy = -np.sin(rad)
+
+        ax.quiver(
+            width - 10, 5,    # position of arrow
+            dx, dy,
+            scale=5,
+            scale_units="xy",
+            color="blue",
+            width=0.01,
+            label=f"Wind: {wind_speed} m/s, {wind_dir}°"
+        )
+
     ax.legend()
     plt.grid(True)
     plt.pause(0.05)
@@ -116,50 +153,76 @@ def get_user_route(width, height, fire_start, tractor_start):
     raw_points = plt.ginput(n=-1, timeout=0)
     plt.close(fig)
 
-    # 🔢 Discretize route to grid
     route = discretize_route(raw_points, width, height)
     return route
 
 
 if __name__ == "__main__":
-    # Bigger world
-    env = FireTractorEnv(width=50, height=50)
+    tractor_start = (25, 0, "right")
 
-    # Random fire start each run (but shown to user)
-    fx = np.random.randint(env.width // 4, 3 * env.width // 4)
-    fy = np.random.randint(env.height // 4, 3 * env.height // 4)
-    fire_start = (fx, fy)
+    for case in TEST_CASES:
+        print("\n==============================")
+        print(f"Running test case: {case['name']}")
+        print("==============================")
 
-    # Tractor starts just outside left border, pointing right
-    tractor_start = (0, env.height // 2, "right")
+        env = FireTractorEnv(
+            width=50,
+            height=50,
+            burn_duration=3.0,
+            sense_radius=4,
+            moisture=0.05,
+            wind_speed=case["wind_speed"],
+            wind_dir=case["wind_dir"],
+        )
 
-    # Let user draw a route, snapped to grid & connected from start
-    route = get_user_route(env.width, env.height, fire_start, tractor_start)
+        fire_start = case["fire_start"]
 
-    # Reset env with that route
-    obs, info = env.reset(fire_start=fire_start, tractor_start=tractor_start, route=route)
+        # Ask user to draw route
+        route = get_user_route(
+            env.width,
+            env.height,
+            fire_start,
+            tractor_start,
+            wind_speed=case["wind_speed"],
+            wind_dir=case["wind_dir"],
+        )
 
-    # Main sim loop: tractor follows route; fire always spreads; stops when fire out
-    for step in range(2000):
-        action = env._next_route_action(obs=obs)
-        print(f"Step {step}: Action {action}")
-        obs, done, truncated, info = env.step(action)
-        env.render(block=False)
-        if done:
-            break
-        time.sleep(0.1)
+        obs, info = env.reset(
+            fire_start=fire_start,
+            tractor_start=tractor_start,
+            route=route
+        )
 
-    # ---- Final summary ----
-    total = env.width * env.height
-    burned = int(np.sum(env.grid.burned))
-    firebreak = len(env.tractor_path)
-    saved = total - burned
+        for step in range(2000):
+            action = env._next_route_action(obs)
+            obs, done, truncated, info = env.step(action)
+            env.render(block=False)
+            if done:
+                break
+            time.sleep(0.05)
 
-    print("\n===== FINAL SIMULATION RESULTS =====")
-    print(f"🌱 Saved land:       {saved}/{total}")
-    print(f"🔥 Burned land:      {burned}")
-    print(f"🟪 Firebreak cells:  {firebreak}")
-    print(f"🚜 Tractor exited:   {'✅' if env.tractor_exited else '❌'}")
-    print(f"💀 Tractor destroyed:{'✅' if env.tractor_dead else '❌'}")
-    print(f"⏱️ Duration:         {env.fire.current_time:.1f} min")
-    print("==============================\n")
+        total = env.width * env.height
+        burned = int(np.sum(env.grid.burned))
+        firebreak = len(env.tractor_path)
+        saved = total - burned
+
+        print("\n===== FINAL RESULTS =====")
+        print(f"🌱 Saved land:       {saved}/{total}")
+        print(f"🔥 Burned land:      {burned}")
+        print(f"🟪 Firebreak cells:  {firebreak}")
+        print(f"🚜 Tractor exited:   {'YES' if env.tractor_exited else 'NO'}")
+        print(f"💀 Tractor destroyed:{'YES' if env.tractor_dead else 'NO'}")
+        print("==============================\n")
+
+        # --- SAVE PNG ---
+        png_path = save_final_png(env, case["name"])
+
+        # Save CSV
+        csv_path = save_summary_csv(
+            case,
+            saved=saved,
+            burned=burned,
+            total=total,
+            tractor_exited=env.tractor_exited,
+            tractor_dead=env.tractor_dead,
+        )

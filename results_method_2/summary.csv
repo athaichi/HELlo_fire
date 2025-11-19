@@ -1,0 +1,7 @@
+case_name,fire_start,wind_speed,wind_dir,saved_land,burned_land,total_land,saved_percent,tractor_exited,tractor_dead
+"Top Right, no wind","(40, 10)",10,0,1982,518,2500,0.7928,True,False
+"Middle, no wind","(25, 25)",10,0,794,1706,2500,0.3176,True,False
+"Top Left, no wind","(10, 10)",10,0,1962,538,2500,0.7848,True,False
+"Middle Top, no wind","(25, 10)",10,0,1453,1047,2500,0.5812,True,False
+"Top Right, strong wind down","(40, 10)",50,180,1686,814,2500,0.6744,True,False
+"Bottom Left, strong wind right","(10, 10)",50,90,1663,837,2500,0.6652,True,False
